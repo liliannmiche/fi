@@ -38,7 +38,7 @@ class Producer:
 
             for job in jobList:
                 # This simulates incoming samples, remove for production eventually
-                time.sleep(0.01)
+                time.sleep(0.1)
                 if __debug__: print 'Submitting job %s to queue, with name %s, priority %s, body %s and sequence %s.' % (job, job.name, job.priority, job.body, job.sequence)
 
                 self.queue.put(job)

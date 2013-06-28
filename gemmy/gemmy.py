@@ -38,13 +38,14 @@ import json
 import time
 import numpy as np
 
+import cPickle as Pickle
+
 # Cassandra API
 import pycassa
 
 
 # Default value parameters for algorithm and Cassandra connection
 from config import *
-
 
 
 class GemmyTask(object):
@@ -210,6 +211,7 @@ class Gemmy(object):
         .. automethod:: _takeDecisionClassifier2
 
     """
+
     
     def __init__(self,  keySpace=confCassandraKeySpace,\
                         serverList=confCassandraHostAndPort,\
@@ -239,6 +241,54 @@ class Gemmy(object):
         for item in fileHashesIterator:
             self.refFilesHashes.append(item[0])
         
+        # ELM object section
+        # Tries to get the weights from the column Family
+        self.elmTrained = False
+        try:
+            if __debug__: print 'Trying for ELM models in database...'
+            cfELM = pycassa.ColumnFamily(self.pool, 'elmFP')
+            self.elmFPInputWeights = self._cassandraToNumpyArray(cfELM, 'inputWeights')
+            self.elmFPInputBiases = self._cassandraToNumpyArray(cfELM, 'inputBiases')
+            self.elmFPOutputWeights = self._cassandraToNumpyArray(cfELM, 'outputWeights')
+            self.elmFPActivationFunction = cfELM.get('activationFunction', columns=['activationFunction'])
+            self.elmFPActivationFunction = confDictActivationFunctions[self.elmFPActivationFunction['activationFunction']]
+            self.elmFPNumberNeurons = self.elmFPInputWeights.shape[0]
+            self.elmFPTrained = True
+            cfELM = pycassa.ColumnFamily(self.pool, 'elmFN')
+            self.elmFNInputWeights = self._cassandraToNumpyArray(cfELM, 'inputWeights')
+            self.elmFNInputBiases = self._cassandraToNumpyArray(cfELM, 'inputBiases')
+            self.elmFNOutputWeights = self._cassandraToNumpyArray(cfELM, 'outputWeights')
+            self.elmFNActivationFunction = cfELM.get('activationFunction', columns=['activationFunction'])
+            self.elmFNActivationFunction = confDictActivationFunctions[self.elmFNActivationFunction['activationFunction']]
+            self.elmFNNumberNeurons = self.elmFNInputWeights.shape[0]
+            self.elmFNTrained = True
+            if __debug__: print 'Found ELM models in database.'
+        except pycassa.NotFoundException:
+            # If we cannot find some of the required data for the ELM, we train it
+            # and store to Cassandra
+            print 'No ELM data found in database, proceeding to training.'
+            self._elmTrain(optimizeFP=True)
+            self._elmTrain(optimizeFP=False)
+            if __debug__: print 'Trying for ELM models in database...'
+            cfELM = pycassa.ColumnFamily(self.pool, 'elmFP')
+            self.elmFPInputWeights = self._cassandraToNumpyArray(cfELM, 'inputWeights')
+            self.elmFPInputBiases = self._cassandraToNumpyArray(cfELM, 'inputBiases')
+            self.elmFPOutputWeights = self._cassandraToNumpyArray(cfELM, 'outputWeights')
+            self.elmFPActivationFunction = cfELM.get('activationFunction', columns=['activationFunction'])
+            self.elmFPActivationFunction = confDictActivationFunctions[self.elmFPActivationFunction['activationFunction']]
+            self.elmFPNumberNeurons = self.elmInputWeights.shape[0]
+            self.elmFPTrained = True
+            cfELM = pycassa.ColumnFamily(self.pool, 'elmFN')
+            self.elmFNInputWeights = self._cassandraToNumpyArray(cfELM, 'inputWeights')
+            self.elmFNInputBiases = self._cassandraToNumpyArray(cfELM, 'inputBiases')
+            self.elmFNOutputWeights = self._cassandraToNumpyArray(cfELM, 'outputWeights')
+            self.elmFNActivationFunction = cfELM.get('activationFunction', columns=['activationFunction'])
+            self.elmFNActivationFunction = confDictActivationFunctions[self.elmFNActivationFunction['activationFunction']]
+            self.elmFNNumberNeurons = self.elmInputWeights.shape[0]
+            self.elmFNTrained = True
+            if __debug__: print 'Found ELM models in database.'
+
+
     def run(self, gemmyTask):
         """
             :rtype: dict of format:
@@ -294,6 +344,29 @@ class Gemmy(object):
 
         
         return SMAFact
+
+
+    def _runTaskForTraining(self, gemmyTask):
+        """
+            Executes the Gemmy algorithm for the given *gemmyTask* of type :class:`gemmy.GemmyTask`
+        """
+        if not isinstance(gemmyTask, GemmyTask):
+            raise Exception('Given task is not an instance of GemmyTask (gotten '+type(gemmyTask)+' ).')
+        self.task = gemmyTask
+        self.minHashDict = {}
+        for featureNumber in self.task.pp_results.keys():
+            self.minHashDict[featureNumber] = []
+            for featureValue in self.task.pp_results[featureNumber]:
+                if ',' in featureValue:
+                    featureValue = featureValue.split(',')[1]
+                if featureValue not in self.minHashDict[featureNumber]:
+                    if self.minHashDict[featureNumber].__len__()+1 > self.maxNumberHashes:
+                        if self.minHashDict[featureNumber][-1] > featureValue:
+                            self.minHashDict[featureNumber].pop()
+                            bisect.insort(self.minHashDict[featureNumber], featureValue)
+                    else:
+                        bisect.insort(self.minHashDict[featureNumber], featureValue)
+        self._getNeighbors()
 
 
     def _insertReferenceSampleInCassandra(self):
@@ -369,25 +442,214 @@ class Gemmy(object):
         SMAFact = {'verdict': verdict, 'confidence': confidence}
         return SMAFact
 
+    ################### ELM Functions Section ###################
+
+    def _numpyArrayToCassandra(self, numpyArray, columnFamily, key):
+        """ Puts a Numpy array in a Cassandra key. Uses Pickle to 
+            store the matrix to a string and back.
+        """
+        if __debug__: print 'Serializing matrix and storing in database.'
+        if not isinstance(columnFamily, pycassa.ColumnFamily):
+            raise Exception('Given Column Family is not an instance of a Column Family.')
+        if not isinstance(numpyArray, np.ndarray):
+            raise Exception('Given array os not a Numpy Array.')
+        if not isinstance(key, str):
+            raise Exception('Given key is not a string.')
+        with columnFamily.batch(queue_size=2) as columnFamilyBatch:
+            columnFamilyBatch.insert(key, {'values': Pickle.dumps(numpyArray.ravel())})
+            columnFamilyBatch.insert(key, {'shape': Pickle.dumps(numpyArray.shape)})
+
+
+    def _cassandraToNumpyArray(self, columnFamily, key):
+        """ Returns a previously stored Numpy array from Cassandra.
+        """
+        if __debug__: print 'De-serializing matrix and to Numpy array.'
+        if not isinstance(columnFamily, pycassa.ColumnFamily):
+            raise Exception('Given Column Family is not an instance of a Column Family.')
+        if not isinstance(key, str):
+            raise Exception('Given key is not a string.')
+        data = columnFamily.get(key, columns=['shape', 'values'])
+        numpyArray = Pickle.loads(data['values']).reshape(Pickle.loads(data['shape']))
+        return numpyArray
+
+
+    def _elmGetNearestNeighborOppositeClass(self, neighbors, classif):
+        if __debug__: print 'Getting nearest neighbor of opposite class...'
+        if classif == 1:
+            # We are looking for the nearest clean sample
+            oppClassif = 'clean'
+        else:
+            # We look for the nearest malware
+            oppClassif = 'malware'
+        listNeighbors = [item[0] for item in neighbors]
+       
+        cfFeaturestats = pycassa.ColumnFamily(self.pool, 'featurestats')
+        tempListClasses = cfFeaturestats.multiget(listNeighbors, columns=['system'])
+        rank, distance = [(i,item2[1]) for i,item2 in enumerate(neighbors) if tempListClasses[item2[0]]['system']==oppClassif][0]
+        #rank, distance = [(i,neighbors[i][1]) for i, item2 in enumerate([item[1] for item in neighbors if item[1]==oppClassif])][0]
+        if rank==0:
+            rank = confMaxRefSamplesCheckedAgainst
+            distance = 1.0
+        if __debug__: print 'Found number '+str(rank)+' at distance '+str(distance)
+        return rank, distance
+
+
+    def _elmGetNearestNeighbor(self, neighbors):
+        if __debug__: print 'Getting the nearest neighbor...'
+        refFileHash = neighbors[1][0]
+        cfFeaturestats = pycassa.ColumnFamily(self.pool, 'featurestats')
+        verdict = cfFeaturestats.get(refFileHash, columns=['classification']).values()[0]
+        if verdict=='clean':
+            verdict=-1
+        else:
+            verdict=1
+        distance = neighbors[1][1]
+        if __debug__: print 'Nearest neighbor is '+str(verdict)+' at distance '+str(distance)
+        return verdict, distance
+
+    def _elmGenerateTaskFromHash(self, hash):
+        JSONData = {"priority":"", "sha1":"", "preprocessor_data": {}, "metadata":{}}   
+
+        JSONData["priority"] = 0
+        JSONData["sha1"] = hash
+        JSONData["preprocessor_data"] = { "classification_status":"unknown",\
+                                          "pp_results":{}\
+                                        }
+        JSONData["metadata"] = { "sha1":"",\
+                                 "system":"",\
+                                 "first_seen":"",\
+                                 "sha256":"",\
+                                 "md5":"",\
+                                 "size":0}  
+        
+        cfFeaturestats = pycassa.ColumnFamily(self.pool, 'featurestats')
+        cfMinhashdata = pycassa.ColumnFamily(self.pool, 'minhashdata')
+        allFeatureStatsData = cfFeaturestats.get(hash)
+        listFeatures = []
+        for key in allFeatureStatsData.keys():
+            if key in ['classification', 'first_seen', 'md5', 'sha256', 'size', 'system']:
+                if key == "first_seen":
+                    JSONData["metadata"]["first_seen"] = allFeatureStatsData['first_seen']
+                if key == "md5":
+                    JSONData["metadata"]["md5"] = allFeatureStatsData['md5']
+                if key == "sha256":
+                    JSONData["metadata"]["sha1"] = allFeatureStatsData['sha256']
+                    JSONData["metadata"]["sha256"] = allFeatureStatsData['sha256']
+                if key == "size":
+                    JSONData["metadata"]["size"] = int(allFeatureStatsData['size'])
+                if key == "system":
+                    JSONData["metadata"]["system"] = allFeatureStatsData['system']
+                    JSONData["metadata"]["classification"] = allFeatureStatsData['system']
+            else:
+                listFeatures.append(key)
+
+        for featureNumber in listFeatures:
+            featureValues = cfMinhashdata.get(hash+':'+featureNumber, column_count=confRefSamplesMaxNumberHashes)
+            featureValues = featureValues.keys()
+            JSONData["preprocessor_data"]["pp_results"][str(featureNumber)]=featureValues  
+
+        task = GemmyTask(JSONData)
+        
+        return task
+
+
+    def _elmCreateTrainingData(self, listHashes):
+        trainDataInput = np.zeros((len(listHashes), 3))
+        trainDataOutput = np.zeros((len(listHashes), 1))
+        if __debug__: print 'Creating Training Data...'
+        for index, hash in enumerate(listHashes):
+            task = self._elmGenerateTaskFromHash(hash)
+            self._runTaskForTraining(task)
+            neighbors = self.neighbors
+            classif1NN, distance1NN = self._elmGetNearestNeighbor(neighbors)
+            rankKNN, distanceKNN = self._elmGetNearestNeighborOppositeClass(neighbors, classif1NN)
+            trainDataInput[index, :] = [float(distance1NN), float(rankKNN), float(distanceKNN)]
+            trainDataOutput[index, 0] = float(classif1NN)
+        return trainDataInput, trainDataOutput
+            
+
+
+    def _elmTrain(self, numSamples=confELMNumSamples, \
+                        numberNeurons=confELMNumberNeurons, \
+                        activationFunction=confELMActivationFunction, \
+                        optimizeFP=True):
+        if not isinstance(numSamples, int):
+            raise Exception('Given number of samples for training is not an integer.')
+        self.elmActivationFunction = confDictActivationFunctions[activationFunction]
+        self.elmNumberNeurons = numberNeurons
+        # MORE CHECKING HERE
+
+        # Get the list of Reference samples to use for the Training
+        listHashes = self.refFilesHashes[:numSamples]
+        elmTrainDataInput, elmTrainDataOutput = self._elmCreateTrainingData(listHashes)
+        if __debug__: print 'Gotten Training Data, training ELM...'
+        elmTrainDataInputDimensionality = elmTrainDataInput.shape[1]
+
+        # Train here:
+        self.elmInputWeights = np.random.random((self.elmNumberNeurons, elmTrainDataInputDimensionality))*2-1
+        self.elmInputBiases = np.random.random((self.elmNumberNeurons, 1))
+        self.elmHiddenLayer = np.dot(elmTrainDataInput, self.elmInputWeights.T)
+        self.elmHiddenLayer += np.tile(self.elmInputBiases, (1, self.elmHiddenLayer.shape[0])).T
+        self.elmHiddenLayer = self.elmActivationFunction(self.elmHiddenLayer)
+        self.elmOutputWeights = np.dot(np.linalg.pinv(self.elmHiddenLayer), elmTrainDataOutput)
+        self.elmTrainOutput = np.dot(self.elmHiddenLayer, self.elmOutputWeights)
+        self.elmTrainError = np.mean(np.power(self.elmTrainOutput-elmTrainDataOutput, 2), axis=0)
+
+        if __debug__: print 'ELM trained, sending to Cassandra...'
+        # Once trained, push it to Cassandra
+        if optimizeFP:
+            nameCF = 'elmFP'
+        else:
+            nameCF = 'elmFN'
+        cfELM = pycassa.ColumnFamily(self.pool, nameCF)
+        self._numpyArrayToCassandra(self.elmInputWeights, cfELM, 'inputWeights')
+        self._numpyArrayToCassandra(self.elmInputBiases, cfELM, 'inputBiases')
+        self._numpyArrayToCassandra(self.elmOutputWeights, cfELM, 'outputWeights')
+        cfELM.insert('activationFunction', {'activationFunction': confDictActivationFunctionsReverse[self.elmActivationFunction]})
+        self._numpyArrayToCassandra(self.elmInputWeights, cfELM, 'inputWeights')
+
+        if __debug__: print 'ELM Trained with '+str(self.elmNumberNeurons)+' neurons, giving MSE: '+str(self.elmTrainError)
+
+
+    def _elmTest(self, verdict1NN, thresholdClassifier):
+        verdict1NNTest, distance1NNTest = self._elmGetNearestNeighbor(self.neighbors)
+        rankNNOp, distanceNNOpp = self._elmGetNearestNeighborOppositeClass(self.neighbors, verdict1NNTest)
+        elmTestData = np.array([distance1NNTest,rankNNOp,distanceNNOpp])
+        if verdict1NN == 'clean':
+            hiddenLayerTest = np.dot(elmTestData, self.elmFNInputWeights.T).reshape((1, self.elmFNNumberNeurons))
+            hiddenLayerTest += np.tile(self.elmFNInputBiases, (1, hiddenLayerTest.shape[0])).T
+            hiddenLayerTest = self.elmFNActivationFunction(hiddenLayerTest)
+            distance = np.dot(hiddenLayerTest, self.elmFNOutputWeights)[0]
+        else:
+            hiddenLayerTest = np.dot(elmTestData, self.elmFPInputWeights.T).reshape((1, self.elmFPNumberNeurons))
+            hiddenLayerTest += np.tile(self.elmFPInputBiases, (1, hiddenLayerTest.shape[0])).T
+            hiddenLayerTest = self.elmFPActivationFunction(hiddenLayerTest)
+            distance = np.dot(hiddenLayerTest, self.elmFPOutputWeights)[0][0]
+        if distance > thresholdClassifier:
+            verdict = verdict1NN
+        else:
+            verdict = 'unknown'
+        return verdict, distance
+
+    ###################### END OF ELM FUNCTION SECTION ###################
 
     def _takeEnsembleDecision(self):
         """
             :rtype: couple ('verdict', confidence) with 'verdict' a *str* and confidence a *float*
 
             Takes a decision on the current sample.
-            This is where we make the ensemble if any, based on the decisions \
-            provided by the different classifiers.  
-
         """ 
 
-        verdict1, confidence1 = self._takeDecisionClassifier1()
+        self.verdict1, self.confidence1 = self._takeDecisionClassifier1()
+        self.verdict2, self.confidence2 = self._takeDecisionClassifier2(self.verdict1)
 
-        print 'Classifier1 says '+str(verdict1)+' with confidence '+str(100*float(confidence1))+'%.'
+        if __debug__: print '1NN says '+str(self.verdict1)+' with confidence '+str(100*float(self.confidence1))+'%.'
+        if __debug__: print 'ELM says '+str(self.verdict2)+' with confidence '+str(100*float(self.confidence2))+'%.'
         
-        return verdict1, confidence1
+        return self.verdict2, self.confidence2
 
 
-    def _takeDecisionClassifier1(self, thresholdClassifier=0.9999):
+    def _takeDecisionClassifier1(self, thresholdClassifier=confThresholdClassifier1):
         """ 
             :param thresholdClassifier: Threshold above which the classifier says 'unknown'
             :type thresholdClassifier: float [defaults to *confThresholdClassifier1*]
@@ -396,20 +658,11 @@ class Gemmy(object):
             Takes a decision on the current sample based on Classifier1's strategy: 
             
             * Look at the first Nearest Neighbor
-            * If the distance to this neighor is greater than a predefined threshold:
-                * Decide that we do not know (verdict is 'unknown'), to limit false positives
-            * Else:
                 * The verdict is that of the nearest neighbor in question
             
             This strategy is based on the report from Petteri Hyvarinen showing (rather unusually) \
             that taking the first nearest neighbor only to make a decision on the sample at hand is \
             always a better idea than taking more (and following the usual KNN majority vote principle).    
-
-            This strategy gives a rather good coverage of the data, when having reasonable threshold.
-            The threshold gives direct control on the Coverage/False Positives tradeoff:
-         
-                * High threshold means good coverage but high false positives rate
-                * Low threshold means bad coverage but low false positives rate 
 
         """
         nearestNeighbor, distance = self.neighbors[0]
@@ -430,6 +683,19 @@ class Gemmy(object):
             else:
                 verdict = 'clean'
                 confidence = 0.0
+        return verdict, confidence
+
+
+    def _takeDecisionClassifier2(self, firstStepVerdict, thresholdClassifier=confThresholdClassifier2):
+        """ 
+            :param firstStepVerdict: Verdict obtained by the 1-NN
+            :type thresholdClassifier: float [defaults to *confThresholdClassifier2*]
+            :rtype: couple ('verdict', confidence) with 'verdict' a *str* and confidence a *float*
+
+            Takes a final decision on the current sample based on Classifier1's verdict, using ELM.  
+
+        """
+        verdict, confidence = self._elmTest(firstStepVerdict, thresholdClassifier)
         return verdict, confidence
 
 
@@ -539,12 +805,4 @@ class Gemmy(object):
         self.neighbors.sort(key=lambda minHashDistances:minHashDistances[1]) 
 
         if __debug__: print 'Elapsed time for this sample: '+str(time.time()-timerBegin)+'s.'
-
-
-
-
-
-
-
-
 

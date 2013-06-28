@@ -110,6 +110,7 @@ class ELM(object):
 
     def __init__(self, connectionPool):
         # Tries to get the weights from the column Family
+        self.trained = False
         try:
             self.pool = connectionPool
             cfELM = pycassa.ColumnFamily(connectionPool, 'elm')
@@ -161,10 +162,10 @@ class ELM(object):
         return neighbors
 
 
-    def train(self, numSamples=confELMNumSamples, \
-                    maxRefSamplesCheckedAgainst=confMaxRefSamplesCheckedAgainst, \
-                    numberNeurons=confELMNumberNeurons, \
-                    activationFunction=confELMActivationFunction):
+    def elmTrain(self, numSamples=confELMNumSamples, \
+                       maxRefSamplesCheckedAgainst=confMaxRefSamplesCheckedAgainst, \
+                       numberNeurons=confELMNumberNeurons, \
+                       activationFunction=confELMActivationFunction):
         if not isinstance(numSamples, int):
             raise Exception('Given number of samples for training is not an integer.')
 

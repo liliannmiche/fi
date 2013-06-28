@@ -140,7 +140,20 @@ class Consumer:
                         for neighbor in self.gemmy.neighbors:
                             neighborsFile.write(str(neighbor[0])+' '+str(neighbor[1])+'\n')
                         neighborsFile.close()
-
+                        decisionFileName = job.body.split('.')[0]+'.decisions'
+                        decisionFile = open(decisionFileName, 'w')
+                        if self.gemmy.verdict1 == 'clean':
+                            verdict1 = -1
+                        else:
+                            verdict1 = 1
+                        if self.gemmy.verdict2 == 'clean':
+                            verdict2 = -1
+                        elif self.gemmy.verdict2 == 'malware':
+                            verdict2 = 1
+                        else:
+                            verdict2 = 0
+                        decisionFile.write(str(verdict1)+' '+str(self.gemmy.confidence1)+' '+str(verdict2)+' '+str(self.gemmy.confidence2)+'\n')
+                        decisionFile.close()
 
                     print SMAFact
                     

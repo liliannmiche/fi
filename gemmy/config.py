@@ -11,6 +11,7 @@ Algorithms parameters and Connection parameters for Cassandra database.
 #           - Check the Cassandra parameters (i.e. TimeOut and PoolSize)
 #			- Update the Classifier parameters once strategy is finalized
 
+import numpy as np
 
 ############### Cassandra parameters #################
 confCassandraKeySpace = 'jozsef'
@@ -48,7 +49,7 @@ confUsedFeatures = ['59']
 # check against len(featuresUsed)*refSamplesMaxNumberHashes).
 # 2000 is probably too much (the gain in precision becomes negligible
 # above a certain value), but do not go below 100.
-confRefSamplesMaxNumberHashes = 500
+confRefSamplesMaxNumberHashes = 1000
 
 # The number of files from the reference set (which lies in Cassandra) to
 # compare against. Ideally, this should equal to the whole set that is in
@@ -64,6 +65,11 @@ confNumberNeighborsReturned = min(10000, confMaxRefSamplesCheckedAgainst)
 
 
 ############### Neural Network (ELM) Parameters #################
-confELMNumberNeurons = 100
-confELMNumSamples = 1000
+confDictActivationFunctions = {'np.sin': np.sin, 'np.tanh': np.tanh}
+confDictActivationFunctionsReverse = {np.sin: 'np.sin', np.tanh: 'np.tanh'}
+confELMNumberNeurons = 500
+confELMNumSamples = 5000
 confELMActivationFunction = 'np.tanh'
+
+confThresholdClassifier1=0.9999
+confThresholdClassifier2=0
