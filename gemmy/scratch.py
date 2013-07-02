@@ -16,7 +16,6 @@ from config import *
 
 
 
-
 class ELMData(object):
     """ This class mainly checks for data structure so that the ELM class
         can run without too much data checking.
