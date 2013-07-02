@@ -1,4 +1,7 @@
-fi
-==
+# fi
 
-Master branch of the gemmy code, with the final implementation.
+Public code for the Future Internet Project
+
+Currently holds:
+
+* Gemmy Malware Classifier
